@@ -27,6 +27,7 @@ export const config = {
   uploadDir: process.env.MEETMART_UPLOAD_DIR || path.join(dataDir, 'uploads'),
   backupDir: process.env.MEETMART_BACKUP_DIR || path.join(dataDir, 'backups'),
   storageMode: process.env.MEETMART_STORAGE_MODE || (isProduction ? 'persistent_disk' : 'local'),
+  allowEphemeralStorage: envBool('ALLOW_EPHEMERAL_STORAGE', false),
   frontendDir: process.env.FRONTEND_DIST_DIR || path.join(projectRoot, 'dist'),
   serveFrontend: envBool('SERVE_FRONTEND', isProduction),
   maxImageBytes: envNumber('MAX_IMAGE_BYTES', 5 * 1024 * 1024),
@@ -56,8 +57,14 @@ export const config = {
 export function validateRuntimeConfig({strict = config.isProduction} = {}) {
   const errors = [];
   const warnings = [];
-  if (!['local','persistent_disk'].includes(config.storageMode)) errors.push('MEETMART_STORAGE_MODE must be local or persistent_disk.');
-  if (strict && config.storageMode !== 'persistent_disk') errors.push('Production requires MEETMART_STORAGE_MODE=persistent_disk for the current storage adapter.');
+  if (!['local','persistent_disk','ephemeral'].includes(config.storageMode)) {
+    errors.push('MEETMART_STORAGE_MODE must be local, persistent_disk, or ephemeral.');
+  }
+  if (strict && config.storageMode !== 'persistent_disk') {
+    if (!(config.storageMode === 'ephemeral' && config.allowEphemeralStorage)) {
+      errors.push('Production requires MEETMART_STORAGE_MODE=persistent_disk. Ephemeral storage is permitted only when ALLOW_EPHEMERAL_STORAGE=true for staging.');
+    }
+  }
   if (strict && String(config.deliveryPinSecret).length < 32) errors.push('DELIVERY_PIN_SECRET must be at least 32 characters in production.');
   if (strict && String(config.deliveryAddressSecret).length < 32) errors.push('DELIVERY_ADDRESS_SECRET must be at least 32 characters in production.');
   if (strict && config.deliveryPinSecret === config.deliveryAddressSecret) errors.push('DELIVERY_PIN_SECRET and DELIVERY_ADDRESS_SECRET must be different.');
@@ -67,5 +74,6 @@ export function validateRuntimeConfig({strict = config.isProduction} = {}) {
   if (config.identityMode === 'demo') warnings.push('Identity verification is in demo mode.');
   if (config.asdPayMode === 'demo') warnings.push('ASD Pay is in demo mode; no real money moves.');
   if (config.storageMode === 'persistent_disk') warnings.push('Persistent-disk storage is suitable for single-instance staging; migrate to managed object storage before horizontal scaling.');
+  if (config.storageMode === 'ephemeral') warnings.push('Ephemeral staging storage can be erased on restart or redeploy. Do not use it for production data, real payments, or identity records.');
   return {ok: errors.length === 0, errors, warnings};
 }
