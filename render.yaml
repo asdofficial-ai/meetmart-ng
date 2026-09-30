@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: meetmart-ng
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health/ready
+    autoDeploy: false
+    disk:
+      name: meetmart-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SERVE_FRONTEND
+        value: "true"
+      - key: MEETMART_DATA_DIR
+        value: /var/data
+      - key: MEETMART_DB_PATH
+        value: /var/data/meetmart.sqlite
+      - key: MEETMART_UPLOAD_DIR
+        value: /var/data/uploads
+      - key: MEETMART_BACKUP_DIR
+        value: /var/data/backups
+      - key: MEETMART_STORAGE_MODE
+        value: persistent_disk
+      - key: SESSION_SAMESITE
+        value: Lax
+      - key: IDENTITY_PROVIDER_MODE
+        value: demo
+      - key: ASD_PAY_MODE
+        value: demo
+      - key: ALLOW_DEMO_PROVIDERS
+        value: "true"
+      - key: BACKUP_ENABLED
+        value: "true"
+      - key: BACKUP_INTERVAL_HOURS
+        value: "24"
+      - key: BACKUP_RETENTION
+        value: "7"
+      - key: DELIVERY_PIN_SECRET
+        generateValue: true
+      - key: DELIVERY_ADDRESS_SECRET
+        generateValue: true

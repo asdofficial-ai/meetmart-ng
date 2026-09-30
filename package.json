@@ -1,0 +1,26 @@
+{
+  "name": "meetmart-ng",
+  "private": true,
+  "version": "0.7.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0",
+    "api": "node server/index.js",
+    "api:test": "node server/tests/smoke.mjs",
+    "api:promote-admin": "node server/scripts/promote-admin.mjs",
+    "start": "node server/index.js",
+    "api:backup": "node server/scripts/backup.mjs",
+    "check": "node --check server/index.js && node --check server/db.js && node --check server/config.js"
+  },
+  "dependencies": {
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "react-router-dom": "latest"
+  },
+  "devDependencies": {
+    "vite": "latest"
+  }
+}
