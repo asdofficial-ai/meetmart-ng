@@ -15,6 +15,9 @@ import {startBackupScheduler} from './infra/backup.js';
 ensureStorageReady();
 const liveClients=new Map();
 const rateLimiter=createRateLimiter({windowMs:config.rateLimitWindowMs,defaultLimit:config.rateLimitDefault,authLimit:config.rateLimitAuth,sensitiveLimit:config.rateLimitSensitive});
+const MARKETPLACE_CITIES=new Set(["Umuahia", "Yola", "Uyo", "Awka", "Bauchi", "Yenagoa", "Makurdi", "Maiduguri", "Calabar", "Asaba", "Abakaliki", "Benin City", "Ado Ekiti", "Enugu", "Gombe", "Owerri", "Dutse", "Kaduna", "Kano", "Katsina", "Birnin Kebbi", "Lokoja", "Ilorin", "Lagos", "Lafia", "Minna", "Abeokuta", "Akure", "Osogbo", "Ibadan", "Jos", "Port Harcourt", "Sokoto", "Jalingo", "Damaturu", "Gusau", "Abuja"]);
+function marketplaceCity(value){const city=String(value||'').trim();return MARKETPLACE_CITIES.has(city)?city:'Kaduna';}
+
 
 const json = (res, status, body, headers = {}) => {
   const payload = JSON.stringify(body);
@@ -300,16 +303,16 @@ async function route(req,res){
   }
 
   if(req.method==='POST'&&url.pathname==='/auth/signup'){
-    const body=await readBody(req); const email=sanitizeEmail(body.email); const displayName=String(body.displayName||'').trim();
+    const body=await readBody(req); const email=sanitizeEmail(body.email); const displayName=String(body.displayName||'').trim(); const city=marketplaceCity(body.city);
     if(!/^\S+@\S+\.\S+$/.test(email)) throw Object.assign(new Error('Enter a valid email address.'),{status:400});
     if(!displayName) throw Object.assign(new Error('Display name is required.'),{status:400});
     if(db.prepare('SELECT id FROM users WHERE email=?').get(email)) throw Object.assign(new Error('An account with this email already exists.'),{status:409});
     const id=randomId('usr_'), created=nowIso(), passwordHash=await hashPassword(String(body.password||''));
-    db.prepare('INSERT INTO users(id,email,password_hash,display_name,city,role,status,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id,email,passwordHash,displayName,'Kaduna','marketplace_user','active',created);
+    db.prepare('INSERT INTO users(id,email,password_hash,display_name,city,role,status,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id,email,passwordHash,displayName,city,'marketplace_user','active',created);
     const token=newSessionToken(), expires=new Date(Date.now()+config.sessionTtlMs).toISOString();
     db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').run(hashToken(token),id,expires,created);
     audit(id,'auth.signup','user',id);
-    return json(res,201,{user:{id,email,displayName,city:'Kaduna',role:'marketplace_user'}},{...cors,'set-cookie':sessionCookie(token,Math.floor(config.sessionTtlMs/1000))});
+    return json(res,201,{user:{id,email,displayName,city,role:'marketplace_user'}},{...cors,'set-cookie':sessionCookie(token,Math.floor(config.sessionTtlMs/1000))});
   }
 
   if(req.method==='POST'&&url.pathname==='/auth/login'){
@@ -718,7 +721,7 @@ async function route(req,res){
 
   // --- Person-to-person marketplace API -----------------------------------
   if(req.method==='GET'&&url.pathname==='/marketplace/listings'){
-    const current=getCurrentUser(req); const city=current?.city||'Kaduna';
+    const current=getCurrentUser(req); const city=current?.city||marketplaceCity(url.searchParams.get('city'));
     const search=String(url.searchParams.get('search')||'').trim(); const category=String(url.searchParams.get('category')||'').trim(); const area=String(url.searchParams.get('area')||'').trim();
     const where=["l.status='active'","l.city=?"]; const params=[city];
     if(search){where.push('(l.title LIKE ? OR l.description LIKE ?)'); params.push(`%${search}%`,`%${search}%`);}
@@ -795,7 +798,7 @@ async function route(req,res){
   }
 
   if(req.method==='GET'&&url.pathname==='/wanted-requests'){
-    const current=getCurrentUser(req); const city=current?.city||'Kaduna'; const status=String(url.searchParams.get('status')||'open');
+    const current=getCurrentUser(req); const city=current?.city||marketplaceCity(url.searchParams.get('city')); const status=String(url.searchParams.get('status')||'open');
     const rows=db.prepare(`SELECT w.*,u.display_name requester_name,(SELECT COUNT(*) FROM wanted_responses wr WHERE wr.request_id=w.id) response_count FROM wanted_requests w JOIN users u ON u.id=w.requester_user_id WHERE w.city=? AND w.status=? ORDER BY w.created_at DESC LIMIT 100`).all(city,status);
     return json(res,200,{requests:rows.map(r=>({id:r.id,title:r.title,details:r.details,category:r.category,budget:r.budget,city:r.city,area:r.area,urgency:r.urgency,status:r.status,createdAt:r.created_at,responseCount:Number(r.response_count||0),requester:{id:r.requester_user_id,displayName:r.requester_name}}))},cors);
   }
