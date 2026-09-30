@@ -18,6 +18,18 @@ jobs:
           node-version: 22
       - name: Apply patch
         run: python3 scripts/account_security_patch.py
+      - name: Fix JSX recovery form typo
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('src/App.jsx')
+          s=p.read_text()
+          bad='autoComplete="email"/></div>}{[\'signup\',\'login\'].includes(mode)'
+          good='autoComplete="email"/></div>{[\'signup\',\'login\'].includes(mode)'
+          if bad not in s:
+              raise SystemExit('Expected recovery form typo not found')
+          p.write_text(s.replace(bad,good,1))
+          PY
       - name: Install
         run: npm install
       - name: Check backend
