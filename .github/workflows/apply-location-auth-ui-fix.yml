@@ -1,0 +1,72 @@
+name: Apply location and mobile header fix
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-location-auth-ui-fix.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Patch MeetMart UI and backend city handling
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def rep(text, old, new, label, count=1):
+              if old not in text:
+                  raise SystemExit(f'Missing expected snippet: {label}')
+              return text.replace(old, new, count)
+
+          app_path=Path('src/App.jsx')
+          app=app_path.read_text()
+          app=rep(app,"import {api} from './services/api.js';","import {api} from './services/api.js';\nimport LocationPicker from './LocationPicker.jsx';\nimport {getSelectedCity} from './location.js';",'App imports')
+          app=rep(app,"function Shell({children, mode='marketplace'}) {","function Shell({children, mode='marketplace', showSearch=false}) {",'Shell signature')
+          app=rep(app,"  const {user,logout}=useAuth();\n  return <div className={`app-shell ${storeMode?'stores-mode':''}`}>","  const {user,logout}=useAuth();\n  const navigate=useNavigate();\n  const [headerQuery,setHeaderQuery]=useState('');\n  const submitHeaderSearch=()=>{const q=headerQuery.trim();navigate(`/search${q?`?q=${encodeURIComponent(q)}`:''}`);};\n  return <div className={`app-shell ${storeMode?'stores-mode':''}`}>",'Shell search state')
+          app=rep(app,'      <div className="header-search"><Search size={18}/><input aria-label="Search" placeholder={storeMode?"Search verified stores or products...":"Search phones, shoes, electronics..."}/><button aria-label="Search"><Search size={18}/></button></div>','      {showSearch&&<div className="header-search"><Search size={18}/><input aria-label="Search" value={headerQuery} onChange={e=>setHeaderQuery(e.target.value)} onKeyDown={e=>e.key===\'Enter\'&&submitHeaderSearch()} placeholder="Search phones, shoes, electronics..."/><button aria-label="Search" onClick={submitHeaderSearch}><Search size={18}/></button></div>}','Header search visibility')
+          app=rep(app,'      <button className="city-chip"><MapPin size={16}/> Kaduna <ChevronDown size={15}/></button>','      <LocationPicker lockedCity={user?.city||null}/>','Header city picker')
+          app=rep(app,'<b>Meet in approved public places in Kaduna</b>','<b>Meet in approved public places in {user?.city||getSelectedCity()}</b>','Safety city')
+          app=rep(app,' return <Shell><div className="page home-page">',' return <Shell showSearch><div className="page home-page">','Home header search')
+          app=rep(app,'<div className="hero-search"><button className="city-chip"><MapPin size={17}/>Kaduna<ChevronDown size={15}/></button><div>','<div className="hero-search"><LocationPicker/><div>','Home city picker')
+          app=rep(app,'<div className="hero-badge"><MapPin/> <b>Kaduna</b><small>Our City. Our Marketplace.</small></div>','<div className="hero-badge"><MapPin/> <b>{getSelectedCity()}</b><small>Our City. Our Marketplace.</small></div>','Home badge city')
+          app=rep(app,'<h2>Latest Listings in Kaduna</h2>','<h2>Latest Listings in {getSelectedCity()}</h2>','Home latest city')
+          app=rep(app,'<p>Be the first person to post an item in Kaduna.</p>','<p>Be the first person to post an item in {getSelectedCity()}.</p>','Home empty city')
+          app=rep(app,"if(mode==='signup') await signup({displayName,email,password});","if(mode==='signup') await signup({displayName,email,password,city:getSelectedCity()});",'Signup selected city')
+          app=rep(app,"function SearchPage(){\n const params = new URLSearchParams(typeof window==='undefined'?'':window.location.search);","function SearchPage(){\n const {user}=useAuth();\n const city=user?.city||getSelectedCity();\n const params = new URLSearchParams(typeof window==='undefined'?'':window.location.search);",'Search city state')
+          app=rep(app,' return <Shell><div className="page search-page"><div className="results-head"><h1>Marketplace in Kaduna</h1><p>{items.length} live listing{items.length===1?\'\':\'s\'} <span className="pill"><MapPin size={13}/>Kaduna (locked)</span></p></div>',' return <Shell showSearch><div className="page search-page"><div className="results-head"><h1>Marketplace in {city}</h1><p>{items.length} live listing{items.length===1?\'\':\'s\'} <span className="pill"><MapPin size={13}/>{city} ({user?\'account city\':\'selected city\'})</span></p></div>','Search heading')
+          app=rep(app,'<label>Area<select value={area} onChange={e=>setArea(e.target.value)}><option value="">All Kaduna</option><option>Kaduna North</option><option>Kaduna South</option><option>Barnawa</option><option>Kawo</option><option>Ungwan Rimi</option></select></label>','<label>Area<input value={area} onChange={e=>setArea(e.target.value)} placeholder={`Area in ${city} (optional)`}/></label>','Search area')
+          app=app.replace("area:'Kaduna North'","area:''")
+          app=rep(app,'<label>City<input value={user.city||\'Kaduna\'} disabled/></label><label>Area in Kaduna<select value={form.area} onChange={e=>change(\'area\',e.target.value)}><option>Kaduna North</option><option>Kaduna South</option><option>Barnawa</option><option>Kawo</option><option>Ungwan Rimi</option></select></label>','<label>City<input value={user.city||getSelectedCity()} disabled/></label><label>Area in {user.city||getSelectedCity()}<input value={form.area} onChange={e=>change(\'area\',e.target.value)} placeholder={`e.g. ${user.city||getSelectedCity()} Central`}/></label>','Sell city/area')
+          app=app.replace('<h2>Similar Listings in Kaduna</h2>','<h2>Similar Listings in {item.city}</h2>')
+          app=app.replace('{selected.listing.area}, Kaduna','{selected.listing.area}, {selected.listing.city}')
+          app=app.replace('<p>Kaduna</p><Link className="btn primary full"','<p>{selected.listing.city}</p><Link className="btn primary full"')
+          app=app.replace('<div className="fake-map"><MapPin className="pin p1"/><MapPin className="pin p2"/><MapPin className="pin p3"/><b>Kaduna</b></div>','<div className="fake-map"><MapPin className="pin p1"/><MapPin className="pin p2"/><MapPin className="pin p3"/><b>{user.city||getSelectedCity()}</b></div>')
+          app_path.write_text(app)
+
+          server_path=Path('server/index.js')
+          server=server_path.read_text()
+          cities=['Umuahia','Yola','Uyo','Awka','Bauchi','Yenagoa','Makurdi','Maiduguri','Calabar','Asaba','Abakaliki','Benin City','Ado Ekiti','Enugu','Gombe','Owerri','Dutse','Kaduna','Kano','Katsina','Birnin Kebbi','Lokoja','Ilorin','Lagos','Lafia','Minna','Abeokuta','Akure','Osogbo','Ibadan','Jos','Port Harcourt','Sokoto','Jalingo','Damaturu','Gusau','Abuja']
+          city_js='const MARKETPLACE_CITIES=new Set('+repr(cities).replace("'",'\"')+');\nfunction marketplaceCity(value){const city=String(value||\'\').trim();return MARKETPLACE_CITIES.has(city)?city:\'Kaduna\';}\n'
+          server=rep(server,'const rateLimiter=createRateLimiter({windowMs:config.rateLimitWindowMs,defaultLimit:config.rateLimitDefault,authLimit:config.rateLimitAuth,sensitiveLimit:config.rateLimitSensitive});','const rateLimiter=createRateLimiter({windowMs:config.rateLimitWindowMs,defaultLimit:config.rateLimitDefault,authLimit:config.rateLimitAuth,sensitiveLimit:config.rateLimitSensitive});\n'+city_js,'Server city allowlist')
+          server=rep(server,"const body=await readBody(req); const email=sanitizeEmail(body.email); const displayName=String(body.displayName||'').trim();","const body=await readBody(req); const email=sanitizeEmail(body.email); const displayName=String(body.displayName||'').trim(); const city=marketplaceCity(body.city);",'Signup city parsing')
+          server=rep(server,"db.prepare('INSERT INTO users(id,email,password_hash,display_name,city,role,status,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id,email,passwordHash,displayName,'Kaduna','marketplace_user','active',created);","db.prepare('INSERT INTO users(id,email,password_hash,display_name,city,role,status,created_at) VALUES(?,?,?,?,?,?,?,?)').run(id,email,passwordHash,displayName,city,'marketplace_user','active',created);",'Signup city insert')
+          server=rep(server,"return json(res,201,{user:{id,email,displayName,city:'Kaduna',role:'marketplace_user'}},{...cors,'set-cookie':sessionCookie(token,Math.floor(config.sessionTtlMs/1000))});","return json(res,201,{user:{id,email,displayName,city,role:'marketplace_user'}},{...cors,'set-cookie':sessionCookie(token,Math.floor(config.sessionTtlMs/1000))});",'Signup city response')
+          server=rep(server,"const current=getCurrentUser(req); const city=current?.city||'Kaduna';\n    const search=String(url.searchParams.get('search')||'').trim();","const current=getCurrentUser(req); const city=current?.city||marketplaceCity(url.searchParams.get('city'));\n    const search=String(url.searchParams.get('search')||'').trim();",'Listing guest city')
+          server=rep(server,"const current=getCurrentUser(req); const city=current?.city||'Kaduna'; const status=String(url.searchParams.get('status')||'open');","const current=getCurrentUser(req); const city=current?.city||marketplaceCity(url.searchParams.get('city')); const status=String(url.searchParams.get('status')||'open');",'Wanted guest city')
+          server_path.write_text(server)
+
+          Path('.github/workflows/apply-location-auth-ui-fix.yml').unlink()
+      - name: Commit patch
+        run: |
+          git config user.name "MeetMart automation"
+          git config user.email "actions@users.noreply.github.com"
+          git add src/App.jsx server/index.js .github/workflows/apply-location-auth-ui-fix.yml
+          git commit -m "Fix auth routing and Nigeria-wide marketplace locations"
+          git push
