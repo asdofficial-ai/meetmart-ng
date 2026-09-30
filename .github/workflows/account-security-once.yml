@@ -1,0 +1,36 @@
+name: MeetMart account security stage
+
+on:
+  push:
+    paths:
+      - '.github/workflows/account-security-once.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  account-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Apply patch
+        run: python3 scripts/account_security_patch.py
+      - name: Install
+        run: npm install
+      - name: Check backend
+        run: npm run check
+      - name: Build frontend
+        run: npm run build
+      - name: Run regression
+        run: npm run api:test
+      - name: Commit stage
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/account-security-once.yml scripts/account_security_patch.py
+          git add server/config.js server/db.js server/index.js src/services/api.js src/App.jsx src/styles.css
+          git commit -m "Add account security and profile management"
+          git push
