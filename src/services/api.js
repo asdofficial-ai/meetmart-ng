@@ -1,4 +1,12 @@
+import {getSelectedCity, setSelectedCity} from '../location.js';
+
 const API_BASE = String(import.meta.env.VITE_API_BASE_URL || (import.meta.env.PROD ? '' : 'http://localhost:8787')).replace(/\/$/, '');
+
+function syncUserCity(payload){
+  const city=payload?.user?.city;
+  if(city) setSelectedCity(city);
+  return payload;
+}
 
 async function request(path, {method='GET', body, headers={}} = {}) {
   let response;
@@ -10,15 +18,13 @@ async function request(path, {method='GET', body, headers={}} = {}) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch {
-    throw new Error('MeetMart backend is unavailable. Start the API service and try again.');
+    throw new Error('MeetMart server is temporarily unreachable. Please retry.');
   }
   let payload = {};
   try { payload = await response.json(); } catch {}
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status}).`);
   return payload;
 }
-
-
 
 async function uploadImage(file) {
   if (!file) throw new Error('Choose an image first.');
@@ -31,7 +37,7 @@ async function uploadImage(file) {
       body: file,
     });
   } catch {
-    throw new Error('MeetMart backend is unavailable. Start the API service and try again.');
+    throw new Error('MeetMart server is temporarily unreachable. Please retry.');
   }
   let payload = {};
   try { payload = await response.json(); } catch {}
@@ -56,9 +62,9 @@ export const api = {
   baseUrl: API_BASE,
   health: () => request('/health'),
   getCommerceConfig: () => request('/commerce/config'),
-  me: () => request('/auth/me'),
-  signup: data => request('/auth/signup',{method:'POST',body:data}),
-  login: data => request('/auth/login',{method:'POST',body:data}),
+  me: async () => syncUserCity(await request('/auth/me')),
+  signup: async data => syncUserCity(await request('/auth/signup',{method:'POST',body:{...data,city:data?.city||getSelectedCity()}})),
+  login: async data => syncUserCity(await request('/auth/login',{method:'POST',body:data})),
   logout: () => request('/auth/logout',{method:'POST',body:{}}),
   getIdentityVerifications: () => request('/identity/verifications'),
   getIdentityEligibility: () => request('/identity/eligibility'),
@@ -90,7 +96,11 @@ export const api = {
   reviewAdminOrderCase: (caseId,data) => request(`/admin/order-cases/${encodeURIComponent(caseId)}/review`,{method:'POST',body:data}),
   getAdminAddressAccess: () => request('/admin/address-access'),
 
-  getMarketplaceListings: (params={}) => { const qs=new URLSearchParams(Object.entries(params).filter(([,v])=>v!==undefined&&v!==null&&v!=='')).toString(); return request(`/marketplace/listings${qs?`?${qs}`:''}`); },
+  getMarketplaceListings: (params={}) => {
+    const withCity={...params,city:params.city||getSelectedCity()};
+    const qs=new URLSearchParams(Object.entries(withCity).filter(([,v])=>v!==undefined&&v!==null&&v!=='')).toString();
+    return request(`/marketplace/listings${qs?`?${qs}`:''}`);
+  },
   getMarketplaceListing: listingId => request(`/marketplace/listings/${encodeURIComponent(listingId)}`),
   getMyMarketplaceListings: () => request('/marketplace/listings/me'),
   uploadMarketplaceImage: file => uploadImage(file),
@@ -99,7 +109,11 @@ export const api = {
   saveMarketplaceListing: listingId => request(`/marketplace/listings/${encodeURIComponent(listingId)}/save`,{method:'POST',body:{}}),
   unsaveMarketplaceListing: listingId => request(`/marketplace/listings/${encodeURIComponent(listingId)}/save`,{method:'DELETE'}),
   getSavedMarketplaceListings: () => request('/marketplace/saved'),
-  getWantedRequests: (params={}) => { const qs=new URLSearchParams(Object.entries(params).filter(([,v])=>v!==undefined&&v!==null&&v!=='')).toString(); return request(`/wanted-requests${qs?`?${qs}`:''}`); },
+  getWantedRequests: (params={}) => {
+    const withCity={...params,city:params.city||getSelectedCity()};
+    const qs=new URLSearchParams(Object.entries(withCity).filter(([,v])=>v!==undefined&&v!==null&&v!=='')).toString();
+    return request(`/wanted-requests${qs?`?${qs}`:''}`);
+  },
   createWantedRequest: data => request('/wanted-requests',{method:'POST',body:data}),
   respondWantedRequest: (requestId,data) => request(`/wanted-requests/${encodeURIComponent(requestId)}/respond`,{method:'POST',body:data}),
   getWantedResponses: requestId => request(`/wanted-requests/${encodeURIComponent(requestId)}/responses`),
@@ -107,7 +121,7 @@ export const api = {
   getConversations: () => request('/conversations'),
   getConversationMessages: conversationId => request(`/conversations/${encodeURIComponent(conversationId)}/messages`),
   sendConversationMessage: (conversationId,body) => request(`/conversations/${encodeURIComponent(conversationId)}/messages`,{method:'POST',body:{body}}),
-  getMeetupLocations: (city='Kaduna') => request(`/meetup-locations?city=${encodeURIComponent(city)}`),
+  getMeetupLocations: (city=getSelectedCity()) => request(`/meetup-locations?city=${encodeURIComponent(city)}`),
   createMeetup: data => request('/meetups',{method:'POST',body:data}),
   getMyMeetups: () => request('/meetups/me'),
   updateMeetupStatus: (meetupId,status) => request(`/meetups/${encodeURIComponent(meetupId)}/status`,{method:'PATCH',body:{status}}),
