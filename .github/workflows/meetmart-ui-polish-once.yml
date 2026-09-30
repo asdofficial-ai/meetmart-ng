@@ -1,0 +1,218 @@
+name: MeetMart mobile UI polish
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  polish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Apply focused UI and city fixes
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('src/App.jsx')
+          s = p.read_text()
+
+          def once(old, new, label):
+              global s
+              if old not in s:
+                  raise SystemExit(f'Missing expected App.jsx pattern: {label}')
+              s = s.replace(old, new, 1)
+
+          once(
+            '<div className="hero-search"><LocationPicker/><div><Search size={18}/><input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key===\'Enter\'&&search()} placeholder="Search phones, shoes, electronics..."/><button onClick={search}><Search/></button></div></div>',
+            '<div className="hero-search"><div className="hero-search-main"><Search size={18}/><input value={query} onChange={e=>setQuery(e.target.value)} onKeyDown={e=>e.key===\'Enter\'&&search()} placeholder={`Search in ${getSelectedCity()}...`}/><button onClick={search} aria-label="Search marketplace"><Search/></button></div><small className="hero-search-location"><MapPin size={14}/>Searching around <b>{getSelectedCity()}</b></small></div>',
+            'hero search'
+          )
+
+          once(
+            "<p>{mode==='signup'?'Create a real MeetMart account stored by the backend.':'Log in to continue to MeetMart NG.'}</p>{mode==='signup'&&<div className=\"field\">",
+            "<p>{mode==='signup'?'Create a real MeetMart account stored by the backend.':'Log in to continue to MeetMart NG.'}</p>{mode==='signup'&&<div className=\"signup-city-warning\"><span className=\"signup-city-icon\"><MapPin size={20}/></span><div><b>Please choose the correct city before signing up</b><p>Your marketplace account will be locked to <strong>{getSelectedCity()}</strong> for same-city safety. Use the city button at the top of this page if you need to change it.</p></div></div>}{mode==='signup'&&<div className=\"field\">",
+            'signup city warning'
+          )
+
+          once("function Requests(){\n const {user}=useAuth();", "function Requests(){\n const {user}=useAuth();\n const city=user?.city||getSelectedCity();", 'requests city')
+          once('<label>Area<select value={form.area} onChange={e=>setForm(v=>({...v,area:e.target.value}))}><option>Kaduna North</option><option>Kaduna South</option><option>Barnawa</option><option>Kawo</option></select></label>', '<label>Area<input value={form.area} onChange={e=>setForm(v=>({...v,area:e.target.value}))} placeholder={`Area in ${city}`}/></label>', 'request area')
+          once('<div className="section-head"><h2>Wanted Requests in Kaduna</h2>', '<div className="section-head"><h2>Wanted Requests in {city}</h2>', 'request heading')
+          once('<p>Post the first request in Kaduna.</p>', '<p>Post the first request in {city}.</p>', 'request empty city')
+
+          once("function StoresHome(){\n const [category,setCategory]=useState('All');", "function StoresHome(){\n const {user}=useAuth();\n const city=user?.city||getSelectedCity();\n const [category,setCategory]=useState('All');", 'stores city')
+          once("const visible=category==='All'?merchants:merchants.filter(store=>store.category===category);", "const cityMerchants=merchants.filter(store=>!store.city||store.city===city);\n const visible=category==='All'?cityMerchants:cityMerchants.filter(store=>store.category===category);", 'store city filter')
+          once('<span className="eyebrow">MEETMART VERIFIED STORES • KADUNA</span>', '<span className="eyebrow">MEETMART VERIFIED STORES • {city.toUpperCase()}</span>', 'store eyebrow')
+          once("<h2>{category==='All'?'Verified stores in Kaduna':`${category} stores in Kaduna`}</h2>", "<h2>{category==='All'?`Verified stores in ${city}`:`${category} stores in ${city}`}</h2>", 'store heading')
+
+          once('placeholder="Full physical shop address in Kaduna"', 'placeholder={`Full physical shop address in ${user.city||getSelectedCity()}`}', 'merchant address placeholder')
+          once("const [address,setAddress]=useState('Kaduna North, Kaduna');", "const [address,setAddress]=useState('');", 'checkout fake address')
+          once("item.city||'Kaduna'", "item.city||getSelectedCity()", 'product city fallback')
+          once("{form.area}, {user.city||'Kaduna'}", "{form.area}, {user.city||getSelectedCity()}", 'sell preview city fallback')
+          once("api.getMeetupLocations(user.city||'Kaduna')", "api.getMeetupLocations(user.city||getSelectedCity())", 'meetup city fallback')
+
+          p.write_text(s)
+
+          lp = Path('src/LocationPicker.jsx')
+          lp.write_text("""import React, {useEffect, useMemo, useState} from 'react';
+          import {MapPin, ChevronDown, Search, X, LockKeyhole} from 'lucide-react';
+          import {MARKET_LOCATIONS, getSelectedCity, setSelectedCity} from './location.js';
+
+          export default function LocationPicker({lockedCity=null}){
+            const [open,setOpen]=useState(false);
+            const [query,setQuery]=useState('');
+            const [selected,setSelected]=useState(()=>lockedCity||getSelectedCity());
+
+            useEffect(()=>{ if(lockedCity) setSelected(lockedCity); },[lockedCity]);
+            useEffect(()=>{
+              const sync=e=>{ if(!lockedCity) setSelected(e?.detail?.city||getSelectedCity()); };
+              window.addEventListener('meetmart:city-changed',sync);
+              return()=>window.removeEventListener('meetmart:city-changed',sync);
+            },[lockedCity]);
+            useEffect(()=>{
+              if(!open)return;
+              const onKey=e=>{if(e.key==='Escape')setOpen(false)};
+              window.addEventListener('keydown',onKey);
+              return()=>window.removeEventListener('keydown',onKey);
+            },[open]);
+
+            const filtered=useMemo(()=>{
+              const q=query.trim().toLowerCase();
+              if(!q)return MARKET_LOCATIONS;
+              return MARKET_LOCATIONS.filter(x=>`${x.state} ${x.city}`.toLowerCase().includes(q));
+            },[query]);
+
+            const choose=city=>{
+              if(lockedCity)return;
+              const next=setSelectedCity(city);
+              setSelected(next);
+              setOpen(false);
+              setQuery('');
+              window.location.reload();
+            };
+
+            const selectedLocation=MARKET_LOCATIONS.find(x=>x.city===selected);
+            return <div className={`location-picker ${open?'is-open':''}`}>
+              <button className="city-chip location-trigger" type="button" onClick={()=>setOpen(v=>!v)} aria-expanded={open}>
+                <MapPin size={16}/><span>{selected}</span>{lockedCity?<LockKeyhole size={13}/>:<ChevronDown size={15}/>} 
+              </button>
+              {open&&<>
+                <button className="location-backdrop" type="button" aria-label="Close location picker" onClick={()=>setOpen(false)}/>
+                <div className="location-popover" role="dialog" aria-modal="true" aria-label="Choose marketplace location">
+                  <div className="location-popover-head"><div><span className="location-kicker">MARKETPLACE LOCATION</span><b>{lockedCity?'Your account city':'Choose your location'}</b><small>{lockedCity?'Your city is locked after signup to keep person-to-person trading local.':'Choose the Nigerian city where you want to browse and trade.'}</small></div><button type="button" onClick={()=>setOpen(false)} aria-label="Close"><X size={20}/></button></div>
+                  {lockedCity?<div className="location-locked"><span className="location-lock-icon"><LockKeyhole size={20}/></span><div><b>{lockedCity}</b><small>{selectedLocation?.state||'Nigeria'} • Account city changes require a future verified profile-change flow.</small></div></div>:<>
+                    <label className="location-search"><Search size={18}/><input autoFocus value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search state or city..."/></label>
+                    <div className="location-list-meta"><b>{query?`${filtered.length} match${filtered.length===1?'':'es'}`:'Nigeria marketplace cities'}</b><small>Tap a city to switch your local marketplace</small></div>
+                    <div className="location-list">{filtered.map(x=><button type="button" key={`${x.state}-${x.city}`} className={selected===x.city?'active':''} onClick={()=>choose(x.city)}><span><b>{x.city}</b><small>{x.state}</small></span><span className="location-check">{selected===x.city?'✓':'›'}</span></button>)}</div>
+                    {!filtered.length&&<div className="location-empty"><MapPin/><b>No matching city</b><small>Try searching by state name or another city.</small></div>}
+                  </>}
+                </div>
+              </>}
+            </div>;
+          }
+          """)
+
+          polish = r'''
+          /* MeetMart mobile visual polish — 2026-09-30 */
+          .home-page .hero{position:relative;border:0;background:linear-gradient(135deg,#f4fffb 0%,#eef8ff 52%,#f8f5ff 100%);box-shadow:0 22px 55px rgba(15,42,73,.10);isolation:isolate}
+          .home-page .hero:before{content:"";position:absolute;width:240px;height:240px;border-radius:50%;background:rgba(10,149,108,.10);left:-90px;top:-100px;z-index:-1}
+          .home-page .hero:after{content:"";position:absolute;width:260px;height:260px;border-radius:50%;background:rgba(74,144,226,.10);right:28%;bottom:-160px;z-index:-1}
+          .home-page .hero-copy{position:relative}
+          .home-page .hero .eyebrow{display:inline-flex;align-items:center;background:#dff8ee;border:1px solid #bcebd9;border-radius:999px;padding:7px 11px;color:#087a59}
+          .home-page .hero h1{letter-spacing:-.035em}
+          .home-page .hero-search{align-items:center;background:rgba(255,255,255,.82);border:1px solid rgba(203,220,228,.9);border-radius:16px;padding:7px;box-shadow:0 12px 28px rgba(16,33,60,.09);backdrop-filter:blur(10px);max-width:650px}
+          .home-page .hero-search-main{display:flex!important;align-items:center!important;gap:9px!important;max-width:none!important;border:0!important;border-radius:12px!important;padding-left:10px!important;background:#fff!important;min-width:0}
+          .home-page .hero-search-main input{min-width:0;width:100%;height:46px;font-size:15px;background:transparent}
+          .home-page .hero-search-main button{flex:0 0 48px!important;height:46px!important;border-radius:11px!important}
+          .hero-search-location{display:flex;align-items:center;gap:5px;color:#64748b;white-space:nowrap;padding:0 8px;font-size:12px}
+          .hero-search-location svg{color:var(--green)}
+          .home-page .hero-points span{background:rgba(255,255,255,.74);border:1px solid rgba(214,228,232,.95);border-radius:999px;padding:8px 10px;box-shadow:0 6px 18px rgba(16,33,60,.05)}
+          .home-page .hero-visual{background:radial-gradient(circle at 68% 24%,#fff 0 7%,transparent 7.5%),linear-gradient(155deg,#bfeafb,#dff7ed 52%,#bdd7b9);}
+          .home-page .hero-badge{border:1px solid rgba(221,229,233,.9);border-radius:16px;box-shadow:0 15px 35px rgba(12,27,55,.14)}
+
+          .signup-city-warning{display:flex;gap:12px;align-items:flex-start;margin:14px 0 16px;padding:14px;border:1px solid #f1d58b;border-radius:14px;background:linear-gradient(135deg,#fff9e8,#fff4c7);box-shadow:0 7px 18px rgba(116,82,10,.06)}
+          .signup-city-icon{width:38px;height:38px;flex:0 0 38px;border-radius:12px;display:grid;place-items:center;background:#fff;color:#a86e00;box-shadow:0 4px 12px rgba(116,82,10,.08)}
+          .signup-city-warning b{display:block;color:#6c4c00;margin:1px 0 3px}
+          .signup-city-warning p{margin:0!important;font-size:13px!important;line-height:1.45;color:#715d2c!important}
+          .signup-city-warning strong{color:#0a7f60}
+
+          .location-backdrop{position:fixed;inset:0;border:0;background:rgba(7,20,38,.46);backdrop-filter:blur(2px);z-index:998;cursor:default}
+          .location-popover{z-index:999!important;border:1px solid rgba(218,228,234,.95)!important;border-radius:22px!important;box-shadow:0 28px 80px rgba(7,24,45,.28)!important;padding:0!important;overflow:hidden!important;background:linear-gradient(180deg,#ffffff,#fbfdfd)!important}
+          .location-popover-head{padding:18px 18px 14px!important;margin:0!important;background:linear-gradient(135deg,#edfff8,#f3f8ff);border-bottom:1px solid #e4edf0}
+          .location-popover-head>div{gap:4px!important}
+          .location-kicker{font-size:10px;font-weight:900;letter-spacing:.14em;color:#0a8b67}
+          .location-popover-head b{font-size:19px;color:#0c1b37}
+          .location-popover-head small{max-width:310px}
+          .location-popover-head>button{width:38px!important;height:38px!important;border-radius:12px!important;background:#fff!important;color:#17324e!important;box-shadow:0 5px 14px rgba(10,31,55,.08)!important}
+          .location-search{margin:14px 16px 8px!important;padding:0 13px!important;border:1px solid #d7e4e9!important;border-radius:14px!important;background:#fff!important;box-shadow:0 7px 18px rgba(16,33,60,.05)}
+          .location-search input{height:48px!important;font-size:15px!important}
+          .location-list-meta{display:flex;align-items:end;justify-content:space-between;gap:12px;padding:2px 18px 10px;color:#243b55}
+          .location-list-meta small{font-size:11px;color:#7b8798;text-align:right}
+          .location-list{grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:9px!important;padding:0 16px 16px!important;max-height:360px!important}
+          .location-list button{width:100%!important;min-width:0!important;min-height:68px;border:1px solid #e1e9ed!important;border-radius:14px!important;padding:11px 12px!important;background:#fff!important;box-shadow:0 5px 14px rgba(16,33,60,.045);transition:transform .15s ease,border-color .15s ease,box-shadow .15s ease}
+          .location-list button:hover{transform:translateY(-1px);border-color:#a9dbc9!important;box-shadow:0 8px 20px rgba(10,149,108,.10)}
+          .location-list button.active{background:linear-gradient(135deg,#e7fbf3,#f4fffb)!important;border-color:#79cdb0!important;color:#087b5b!important}
+          .location-list button span:first-child{min-width:0}
+          .location-list button b{font-size:15px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+          .location-list button small{font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+          .location-check{font-size:20px;font-weight:800;color:#0a956c;padding-left:6px}
+          .location-locked{margin:16px!important;border:1px solid #e0e8ec;background:linear-gradient(135deg,#f7fbfc,#eff8f5)!important;border-radius:16px!important;padding:16px!important}
+          .location-lock-icon{width:38px;height:38px;border-radius:12px;display:grid;place-items:center;background:#fff;color:#0a956c;box-shadow:0 5px 14px rgba(16,33,60,.06)}
+          .location-empty{margin:20px;min-height:150px;display:grid;place-items:center;align-content:center;gap:5px;color:#748196;text-align:center}
+          .location-empty svg{color:#0a956c}
+
+          @media(max-width:760px){
+            .page.home-page{padding-top:14px}
+            .home-page .hero{display:block;min-height:0;border-radius:24px;overflow:hidden}
+            .home-page .hero-copy{padding:26px 21px 25px}
+            .home-page .hero h1{font-size:clamp(40px,12vw,54px);line-height:.96;margin:15px 0 14px}
+            .home-page .hero p{font-size:15px;line-height:1.5;margin-bottom:0}
+            .home-page .hero-search{display:block;margin-top:19px;padding:6px;max-width:none}
+            .hero-search-location{padding:8px 8px 4px;white-space:normal}
+            .home-page .hero-points{gap:7px;margin-top:14px}
+            .home-page .hero-points span{font-size:11.5px;padding:7px 9px}
+            .home-page .hero-visual{display:none}
+            .location-popover{position:fixed!important;left:0!important;right:0!important;top:auto!important;bottom:0!important;width:100%!important;max-height:84vh!important;border-radius:26px 26px 0 0!important;animation:meetmartSheetIn .2s ease-out}
+            .location-popover-head{padding:20px 18px 14px!important}
+            .location-popover-head b{font-size:21px}
+            .location-search{margin:12px 16px 8px!important;position:sticky;top:0;z-index:2}
+            .location-list-meta{padding:2px 18px 10px}
+            .location-list{grid-template-columns:repeat(2,minmax(0,1fr))!important;max-height:calc(84vh - 200px)!important;padding-bottom:90px!important}
+            .location-list button{min-height:72px!important}
+            .location-list button b{font-size:16px}
+            .signup-city-warning{margin-top:12px}
+          }
+          @media(max-width:390px){
+            .location-list{grid-template-columns:1fr!important}
+            .home-page .hero-copy{padding-left:18px;padding-right:18px}
+          }
+          @keyframes meetmartSheetIn{from{transform:translateY(22px);opacity:.7}to{transform:translateY(0);opacity:1}}
+          '''
+          Path('src/polish.css').write_text(polish)
+
+          main = Path('src/main.jsx')
+          m = main.read_text()
+          if "import './polish.css';" not in m:
+              m = m.replace("import './location.css';", "import './location.css';\nimport './polish.css';")
+          main.write_text(m)
+          PY
+
+      - name: Install and build
+        run: |
+          npm install
+          npm run build
+
+      - name: Commit polished build
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/App.jsx src/LocationPicker.jsx src/main.jsx src/polish.css
+          git rm .github/workflows/meetmart-ui-polish-once.yml
+          git commit -m "Polish mobile UI and city safety flows"
+          git push
