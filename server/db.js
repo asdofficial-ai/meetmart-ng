@@ -129,6 +129,29 @@ CREATE TABLE IF NOT EXISTS audit_events (
 export function nowIso(){ return new Date().toISOString(); }
 
 try { db.exec('ALTER TABLE merchants ADD COLUMN delivery_fee INTEGER NOT NULL DEFAULT 0'); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN email_verified_at TEXT'); } catch {}
+try { db.exec('ALTER TABLE users ADD COLUMN profile_updated_at TEXT'); } catch {}
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS email_verification_codes (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_email_verification_user ON email_verification_codes(user_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS password_reset_codes (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  used_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_password_reset_user ON password_reset_codes(user_id,created_at DESC);
+`);
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS marketplace_listings (

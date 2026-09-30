@@ -175,14 +175,20 @@ function sessionCookie(token, maxAgeSeconds){
 function getCurrentUser(req){
   const token=parseCookies(req)[config.cookieName];
   if(!token) return null;
-  const row=db.prepare(`SELECT u.id,u.email,u.display_name,u.city,u.role,u.status,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?`).get(hashToken(token));
+  const row=db.prepare(`SELECT u.id,u.email,u.display_name,u.city,u.role,u.status,u.email_verified_at,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?`).get(hashToken(token));
   if(!row) return null;
   if(new Date(row.expires_at).getTime()<=Date.now()) { db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hashToken(token)); return null; }
   if(row.status!=='active') return null;
-  return {id:row.id,email:row.email,displayName:row.display_name,city:row.city,role:row.role};
+  return {id:row.id,email:row.email,displayName:row.display_name,city:row.city,role:row.role,emailVerified:Boolean(row.email_verified_at)};
 }
 
 function requireUser(req){ const user=getCurrentUser(req); if(!user) throw Object.assign(new Error('Authentication required.'),{status:401}); return user; }
+function sixDigitCode(){ return String(crypto.randomInt(0,1_000_000)).padStart(6,'0'); }
+function codeExpires(minutes=15){ return new Date(Date.now()+minutes*60_000).toISOString(); }
+function validCode(value){ return /^\d{6}$/.test(String(value||'')); }
+function accountUserById(id){ return db.prepare('SELECT id,email,display_name,city,role,status,email_verified_at,created_at FROM users WHERE id=?').get(id); }
+function publicAccountUser(row){ return row?{id:row.id,email:row.email,displayName:row.display_name,city:row.city,role:row.role,emailVerified:Boolean(row.email_verified_at),createdAt:row.created_at}:null; }
+
 function requireAdmin(req){ const user=requireUser(req); if(user.role!=='admin') throw Object.assign(new Error('Admin access required.'),{status:403}); return user; }
 
 function audit(actorUserId, action, entityType, entityId, metadata={}){
@@ -302,6 +308,47 @@ async function route(req,res){
     return json(res,201,{upload:{id,url:publicAssetUrl(req,publicPath),mimeType:info.mime,sizeBytes:raw.length}},cors);
   }
 
+  if(req.method==='POST'&&url.pathname==='/auth/email-verification/request'){
+    const user=requireUser(req); const row=accountUserById(user.id);
+    if(row?.email_verified_at) return json(res,200,{ok:true,alreadyVerified:true},cors);
+    const code=sixDigitCode(), now=nowIso(), expiresAt=codeExpires(15);
+    db.prepare('DELETE FROM email_verification_codes WHERE user_id=? AND used_at IS NULL').run(user.id);
+    db.prepare('INSERT INTO email_verification_codes(id,user_id,code_hash,expires_at,used_at,created_at) VALUES(?,?,?,?,?,?)').run(randomId('evc_'),user.id,hashToken(code),expiresAt,null,now);
+    audit(user.id,'auth.email_verification.request','user',user.id,{mode:config.emailMode});
+    return json(res,200,{ok:true,expiresInMinutes:15,delivery:config.emailMode,demoCode:config.emailMode==='demo'?code:undefined},cors);
+  }
+  if(req.method==='POST'&&url.pathname==='/auth/email-verification/confirm'){
+    const user=requireUser(req); const body=await readBody(req); const code=String(body.code||'').trim();
+    if(!validCode(code)) throw Object.assign(new Error('Enter the 6-digit verification code.'),{status:400});
+    const row=db.prepare('SELECT * FROM email_verification_codes WHERE user_id=? AND used_at IS NULL ORDER BY created_at DESC LIMIT 1').get(user.id);
+    if(!row||new Date(row.expires_at).getTime()<=Date.now()||hashToken(code)!==row.code_hash) throw Object.assign(new Error('Verification code is invalid or expired.'),{status:400});
+    const now=nowIso(); db.prepare('UPDATE users SET email_verified_at=?,profile_updated_at=? WHERE id=?').run(now,now,user.id); db.prepare('UPDATE email_verification_codes SET used_at=? WHERE id=?').run(now,row.id);
+    audit(user.id,'auth.email_verification.confirm','user',user.id); return json(res,200,{ok:true,user:publicAccountUser(accountUserById(user.id))},cors);
+  }
+  if(req.method==='POST'&&url.pathname==='/auth/password/forgot'){
+    const body=await readBody(req); const email=sanitizeEmail(body.email); const row=db.prepare("SELECT * FROM users WHERE email=? AND status='active'").get(email); let demoCode;
+    if(row){const code=sixDigitCode(),now=nowIso(),expiresAt=codeExpires(15);db.prepare('DELETE FROM password_reset_codes WHERE user_id=? AND used_at IS NULL').run(row.id);db.prepare('INSERT INTO password_reset_codes(id,user_id,code_hash,expires_at,used_at,created_at) VALUES(?,?,?,?,?,?)').run(randomId('prc_'),row.id,hashToken(code),expiresAt,null,now);audit(row.id,'auth.password_reset.request','user',row.id,{mode:config.emailMode});if(config.emailMode==='demo')demoCode=code;}
+    return json(res,200,{ok:true,message:'If an active MeetMart account uses that email, a reset code has been created.',delivery:config.emailMode,demoCode},cors);
+  }
+  if(req.method==='POST'&&url.pathname==='/auth/password/reset'){
+    const body=await readBody(req); const email=sanitizeEmail(body.email); const code=String(body.code||'').trim(); const newPassword=String(body.newPassword||'');
+    if(!validCode(code)) throw Object.assign(new Error('Enter the 6-digit reset code.'),{status:400}); const userRow=db.prepare("SELECT * FROM users WHERE email=? AND status='active'").get(email); if(!userRow) throw Object.assign(new Error('Reset code is invalid or expired.'),{status:400});
+    const reset=db.prepare('SELECT * FROM password_reset_codes WHERE user_id=? AND used_at IS NULL ORDER BY created_at DESC LIMIT 1').get(userRow.id); if(!reset||new Date(reset.expires_at).getTime()<=Date.now()||hashToken(code)!==reset.code_hash) throw Object.assign(new Error('Reset code is invalid or expired.'),{status:400});
+    const passwordHash=await hashPassword(newPassword),now=nowIso(); db.prepare('UPDATE users SET password_hash=?,profile_updated_at=? WHERE id=?').run(passwordHash,now,userRow.id);db.prepare('UPDATE password_reset_codes SET used_at=? WHERE id=?').run(now,reset.id);db.prepare('DELETE FROM sessions WHERE user_id=?').run(userRow.id);audit(userRow.id,'auth.password_reset.complete','user',userRow.id);return json(res,200,{ok:true,message:'Password reset. Sign in with your new password.'},{...cors,'set-cookie':sessionCookie('',0)});
+  }
+  if(req.method==='GET'&&url.pathname==='/account/security'){
+    const user=requireUser(req); const row=accountUserById(user.id); const activeSessions=Number(db.prepare('SELECT COUNT(*) count FROM sessions WHERE user_id=? AND expires_at>?').get(user.id,nowIso())?.count||0); return json(res,200,{user:publicAccountUser(row),security:{emailVerified:Boolean(row.email_verified_at),activeSessions,cityLocked:true}},cors);
+  }
+  if(req.method==='PATCH'&&url.pathname==='/account/profile'){
+    const user=requireUser(req); const body=await readBody(req); const displayName=String(body.displayName||'').trim(); if(displayName.length<2||displayName.length>60) throw Object.assign(new Error('Display name must be between 2 and 60 characters.'),{status:400}); db.prepare('UPDATE users SET display_name=?,profile_updated_at=? WHERE id=?').run(displayName,nowIso(),user.id);audit(user.id,'account.profile.update','user',user.id);return json(res,200,{user:publicAccountUser(accountUserById(user.id))},cors);
+  }
+  if(req.method==='POST'&&url.pathname==='/account/password'){
+    const user=requireUser(req); const body=await readBody(req); const currentPassword=String(body.currentPassword||''); const newPassword=String(body.newPassword||''); const row=db.prepare('SELECT * FROM users WHERE id=?').get(user.id); if(!row||!(await verifyPassword(currentPassword,row.password_hash))) throw Object.assign(new Error('Current password is incorrect.'),{status:401}); if(currentPassword===newPassword) throw Object.assign(new Error('Choose a different new password.'),{status:400}); const passwordHash=await hashPassword(newPassword),now=nowIso();db.prepare('UPDATE users SET password_hash=?,profile_updated_at=? WHERE id=?').run(passwordHash,now,user.id);const currentToken=parseCookies(req)[config.cookieName];if(currentToken)db.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash<>?').run(user.id,hashToken(currentToken));audit(user.id,'account.password.change','user',user.id);return json(res,200,{ok:true,message:'Password changed. Other signed-in devices were logged out.'},cors);
+  }
+  if(req.method==='POST'&&url.pathname==='/auth/logout-all'){
+    const user=requireUser(req); db.prepare('DELETE FROM sessions WHERE user_id=?').run(user.id);audit(user.id,'auth.logout_all','user',user.id);return json(res,200,{ok:true},{...cors,'set-cookie':sessionCookie('',0)});
+  }
+
   if(req.method==='POST'&&url.pathname==='/auth/signup'){
     const body=await readBody(req); const email=sanitizeEmail(body.email); const displayName=String(body.displayName||'').trim(); const city=marketplaceCity(body.city);
     if(!/^\S+@\S+\.\S+$/.test(email)) throw Object.assign(new Error('Enter a valid email address.'),{status:400});
@@ -312,7 +359,7 @@ async function route(req,res){
     const token=newSessionToken(), expires=new Date(Date.now()+config.sessionTtlMs).toISOString();
     db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').run(hashToken(token),id,expires,created);
     audit(id,'auth.signup','user',id);
-    return json(res,201,{user:{id,email,displayName,city,role:'marketplace_user'}},{...cors,'set-cookie':sessionCookie(token,Math.floor(config.sessionTtlMs/1000))});
+    return json(res,201,{user:{id,email,displayName,city,role:'marketplace_user',emailVerified:false}},{...cors,'set-cookie':sessionCookie(token,Math.floor(config.sessionTtlMs/1000))});
   }
 
   if(req.method==='POST'&&url.pathname==='/auth/login'){
@@ -322,7 +369,7 @@ async function route(req,res){
     const token=newSessionToken(), created=nowIso(), expires=new Date(Date.now()+config.sessionTtlMs).toISOString();
     db.prepare('INSERT INTO sessions(token_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').run(hashToken(token),row.id,expires,created);
     audit(row.id,'auth.login','user',row.id);
-    return json(res,200,{user:{id:row.id,email:row.email,displayName:row.display_name,city:row.city,role:row.role}},{...cors,'set-cookie':sessionCookie(token,Math.floor(config.sessionTtlMs/1000))});
+    return json(res,200,{user:{id:row.id,email:row.email,displayName:row.display_name,city:row.city,role:row.role,emailVerified:Boolean(row.email_verified_at)}},{...cors,'set-cookie':sessionCookie(token,Math.floor(config.sessionTtlMs/1000))});
   }
 
   if(req.method==='POST'&&url.pathname==='/auth/logout'){

@@ -39,6 +39,7 @@ export const config = {
   allowedOrigins: (process.env.ALLOWED_ORIGINS || (isProduction ? '' : 'http://localhost:5173,http://127.0.0.1:5173'))
     .split(',').map(v => v.trim()).filter(Boolean),
   identityMode: process.env.IDENTITY_PROVIDER_MODE || 'demo',
+  emailMode: process.env.EMAIL_PROVIDER_MODE || 'demo',
   asdPayMode: process.env.ASD_PAY_MODE || 'demo',
   allowDemoProviders: envBool('ALLOW_DEMO_PROVIDERS', !isProduction),
   meetMartCommissionRate: envNumber('MEETMART_COMMISSION_RATE', 0.05),
@@ -72,6 +73,7 @@ export function validateRuntimeConfig({strict = config.isProduction} = {}) {
     errors.push('Demo identity/payment providers are disabled in production. Configure real providers or explicitly set ALLOW_DEMO_PROVIDERS=true for staging only.');
   }
   if (config.identityMode === 'demo') warnings.push('Identity verification is in demo mode.');
+  if (config.emailMode === 'demo') warnings.push('Email verification/password recovery is in demo mode; staging shows codes instead of emailing them.');
   if (config.asdPayMode === 'demo') warnings.push('ASD Pay is in demo mode; no real money moves.');
   if (config.storageMode === 'persistent_disk') warnings.push('Persistent-disk storage is suitable for single-instance staging; migrate to managed object storage before horizontal scaling.');
   if (config.storageMode === 'ephemeral') warnings.push('Ephemeral staging storage can be erased on restart or redeploy. Do not use it for production data, real payments, or identity records.');
