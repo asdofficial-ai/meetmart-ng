@@ -161,6 +161,35 @@ try{
   r=await call('/meetups/me'); assert.equal(r.res.status,200); assert.equal(r.body.meetups.length,1); assert.equal(r.body.meetups[0].status,'completed');
   assert.equal(r.body.meetups[0].buyer.id,buyerId);
 
+
+  // Public trust profile exposes marketplace trust signals but never the seller email.
+  cookie=buyerCookie;
+  r=await call(`/marketplace/users/${userId}/profile`); assert.equal(r.res.status,200); assert.equal(r.body.profile.displayName,'Test User'); assert.equal(r.body.profile.reviewCount,1); assert.equal(r.body.profile.email,undefined); assert.equal(r.body.profile.listings.length,1);
+
+  // Buyer can file a private report, block contact, and unblock later.
+  r=await call('/marketplace/reports',{method:'POST',body:JSON.stringify({userId,listingId,conversationId,reason:'suspected_scam',details:'Seller asked me to move payment outside the safe marketplace flow.'})}); assert.equal(r.res.status,201); const marketplaceReportId=r.body.report.id;
+  r=await call('/marketplace/blocks',{method:'POST',body:JSON.stringify({userId})}); assert.equal(r.res.status,200); assert.equal(r.body.blocked,true);
+  r=await call(`/conversations/${conversationId}/messages`,{method:'POST',body:JSON.stringify({body:'This should be blocked.'})}); assert.equal(r.res.status,403);
+  r=await call('/marketplace/blocks'); assert.equal(r.res.status,200); assert.ok(r.body.blockedUsers.some(x=>x.id===userId));
+  r=await call(`/marketplace/blocks/${userId}`,{method:'DELETE'}); assert.equal(r.res.status,200);
+  r=await call(`/conversations/${conversationId}/messages`,{method:'POST',body:JSON.stringify({body:'Contact restored after unblock.'})}); assert.equal(r.res.status,201);
+
+  // A separate moderator reviews reports and manages physically reviewed meetup locations.
+  cookie='';
+  r=await call('/auth/signup',{method:'POST',body:JSON.stringify({email:'moderator@example.com',password:'StrongPass3',displayName:'MeetMart Moderator',city:'Kano'})}); assert.equal(r.res.status,201); const moderatorId=r.body.user.id; const moderatorCookie=cookie;
+  db.prepare("UPDATE users SET role='admin' WHERE id=?").run(moderatorId);
+  cookie=moderatorCookie;
+  r=await call('/admin/marketplace-reports'); assert.equal(r.res.status,200); assert.ok(r.body.reports.some(x=>x.id===marketplaceReportId));
+  r=await call(`/admin/marketplace-reports/${marketplaceReportId}`,{method:'PATCH',body:JSON.stringify({decision:'remove_listing',note:'Listing removed during isolated moderation test.'})}); assert.equal(r.res.status,200); assert.equal(r.body.report.status,'resolved');
+  r=await call('/admin/meetup-locations?city=Kano'); assert.equal(r.res.status,200);
+  r=await call('/admin/meetup-locations',{method:'POST',body:JSON.stringify({name:'Test Reviewed Public Venue',city:'Kano',area:'Kano Municipal',kind:'Public place'})}); assert.equal(r.res.status,201); const kanoLocationId=r.body.location.id;
+  r=await call('/meetup-locations'); assert.equal(r.res.status,200); assert.ok(r.body.locations.some(x=>x.id===kanoLocationId));
+  r=await call(`/admin/meetup-locations/${kanoLocationId}`,{method:'PATCH',body:JSON.stringify({status:'disabled'})}); assert.equal(r.res.status,200); assert.equal(r.body.location.status,'disabled');
+
+  // A listing removed by moderation cannot be reactivated by its seller.
+  cookie=sellerCookie;
+  r=await call(`/marketplace/listings/${listingId}`,{method:'PATCH',body:JSON.stringify({status:'active'})}); assert.equal(r.res.status,403);
+
   r=await call('/auth/logout',{method:'POST',body:'{}'}); assert.equal(r.res.status,200);
   console.log('MeetMart API smoke test passed');
 } finally { await new Promise(resolve=>server.close(resolve)); fs.rmSync(tmp,{recursive:true,force:true}); }

@@ -191,6 +191,15 @@ function publicAccountUser(row){ return row?{id:row.id,email:row.email,displayNa
 
 function requireAdmin(req){ const user=requireUser(req); if(user.role!=='admin') throw Object.assign(new Error('Admin access required.'),{status:403}); return user; }
 
+function usersBlocked(firstUserId,secondUserId){
+  if(!firstUserId||!secondUserId||firstUserId===secondUserId) return false;
+  return Boolean(db.prepare(`SELECT 1 FROM user_blocks WHERE (blocker_user_id=? AND blocked_user_id=?) OR (blocker_user_id=? AND blocked_user_id=?) LIMIT 1`).get(firstUserId,secondUserId,secondUserId,firstUserId));
+}
+function assertContactAllowed(firstUserId,secondUserId){
+  if(usersBlocked(firstUserId,secondUserId)) throw Object.assign(new Error('Contact is blocked between these accounts.'),{status:403});
+}
+
+
 function audit(actorUserId, action, entityType, entityId, metadata={}){
   db.prepare('INSERT INTO audit_events(id,actor_user_id,action,entity_type,entity_id,metadata_json,created_at) VALUES(?,?,?,?,?,?,?)')
     .run(randomId('aud_'),actorUserId||null,action,entityType,entityId,JSON.stringify(metadata),nowIso());
@@ -766,6 +775,87 @@ async function route(req,res){
   }
 
 
+  // --- Marketplace trust, blocking & moderation ---------------------------
+  const marketplaceUserProfile=url.pathname.match(/^\/marketplace\/users\/([^/]+)\/profile$/);
+  if(req.method==='GET'&&marketplaceUserProfile){
+    const viewer=getCurrentUser(req); const targetId=marketplaceUserProfile[1];
+    const row=db.prepare(`SELECT u.id,u.display_name,u.city,u.created_at,u.email_verified_at,u.role,
+      (SELECT status FROM identity_verifications iv WHERE iv.user_id=u.id AND iv.type='nin' LIMIT 1) identity_status,
+      (SELECT COUNT(*) FROM marketplace_listings l WHERE l.seller_user_id=u.id AND l.status='active') active_listings,
+      (SELECT COUNT(*) FROM meetups m WHERE m.status='completed' AND (m.buyer_user_id=u.id OR m.seller_user_id=u.id)) completed_meetups,
+      (SELECT COUNT(*) FROM marketplace_reviews r WHERE r.reviewee_user_id=u.id) review_count,
+      (SELECT COALESCE(AVG(r.rating),0) FROM marketplace_reviews r WHERE r.reviewee_user_id=u.id) rating
+      FROM users u WHERE u.id=? AND u.status='active'`).get(targetId);
+    if(!row) throw Object.assign(new Error('Marketplace profile not found.'),{status:404});
+    const listings=db.prepare("SELECT id,title,description,category,condition,price,city,area,image_url,status,created_at FROM marketplace_listings WHERE seller_user_id=? AND status='active' ORDER BY created_at DESC LIMIT 12").all(targetId);
+    return json(res,200,{profile:{id:row.id,displayName:row.display_name,city:row.city,joinedAt:row.created_at,emailVerified:Boolean(row.email_verified_at),identityStatus:row.identity_status||'unverified',activeListings:Number(row.active_listings||0),completedMeetups:Number(row.completed_meetups||0),reviewCount:Number(row.review_count||0),rating:Number(Number(row.rating||0).toFixed(1)),contactBlocked:viewer?usersBlocked(viewer.id,row.id):false,listings:listings.map(l=>({id:l.id,title:l.title,description:l.description,category:l.category,condition:l.condition,price:l.price,city:l.city,area:l.area,imageUrl:publicAssetUrl(req,l.image_url),status:l.status,createdAt:l.created_at,seller:{id:row.id,displayName:row.display_name,rating:Number(Number(row.rating||0).toFixed(1)),reviewCount:Number(row.review_count||0)}}))}},cors);
+  }
+
+  if(req.method==='GET'&&url.pathname==='/marketplace/blocks'){
+    const user=requireUser(req); const rows=db.prepare(`SELECT b.blocked_user_id,u.display_name,u.city,b.created_at FROM user_blocks b JOIN users u ON u.id=b.blocked_user_id WHERE b.blocker_user_id=? ORDER BY b.created_at DESC`).all(user.id);
+    return json(res,200,{blockedUsers:rows.map(r=>({id:r.blocked_user_id,displayName:r.display_name,city:r.city,blockedAt:r.created_at}))},cors);
+  }
+  if(req.method==='POST'&&url.pathname==='/marketplace/blocks'){
+    const user=requireUser(req); const body=await readBody(req); const targetId=String(body.userId||'').trim();
+    if(!targetId||targetId===user.id) throw Object.assign(new Error('Choose another marketplace user to block.'),{status:400});
+    const target=db.prepare("SELECT id,display_name FROM users WHERE id=? AND status='active'").get(targetId); if(!target) throw Object.assign(new Error('User not found.'),{status:404});
+    const now=nowIso(); db.prepare('INSERT OR IGNORE INTO user_blocks(blocker_user_id,blocked_user_id,created_at) VALUES(?,?,?)').run(user.id,targetId,now);
+    db.prepare("UPDATE meetups SET status='cancelled',updated_at=? WHERE status IN ('pending','confirmed') AND ((buyer_user_id=? AND seller_user_id=?) OR (buyer_user_id=? AND seller_user_id=?))").run(now,user.id,targetId,targetId,user.id);
+    audit(user.id,'marketplace.user.block','user',targetId); return json(res,200,{blocked:true,user:{id:target.id,displayName:target.display_name}},cors);
+  }
+  const marketplaceUnblock=url.pathname.match(/^\/marketplace\/blocks\/([^/]+)$/);
+  if(req.method==='DELETE'&&marketplaceUnblock){
+    const user=requireUser(req); db.prepare('DELETE FROM user_blocks WHERE blocker_user_id=? AND blocked_user_id=?').run(user.id,marketplaceUnblock[1]); audit(user.id,'marketplace.user.unblock','user',marketplaceUnblock[1]); return json(res,200,{blocked:false},cors);
+  }
+
+  if(req.method==='POST'&&url.pathname==='/marketplace/reports'){
+    const user=requireUser(req); const body=await readBody(req); const reason=String(body.reason||'other').trim(); const details=String(body.details||'').trim();
+    const allowedReasons=new Set(['suspected_scam','harassment','unsafe_behavior','misleading_listing','prohibited_item','other']);
+    if(!allowedReasons.has(reason)) throw Object.assign(new Error('Choose a valid report reason.'),{status:400});
+    if(details.length<8||details.length>1200) throw Object.assign(new Error('Report details must be between 8 and 1200 characters.'),{status:400});
+    let reportedUserId=String(body.userId||'').trim(), listingId=body.listingId?String(body.listingId):null, conversationId=body.conversationId?String(body.conversationId):null;
+    if(listingId){const listing=db.prepare('SELECT seller_user_id FROM marketplace_listings WHERE id=?').get(listingId); if(!listing) throw Object.assign(new Error('Listing not found.'),{status:404}); reportedUserId=listing.seller_user_id;}
+    if(conversationId){const conversation=db.prepare('SELECT buyer_user_id,seller_user_id FROM conversations WHERE id=? AND (buyer_user_id=? OR seller_user_id=?)').get(conversationId,user.id,user.id); if(!conversation) throw Object.assign(new Error('Conversation not found.'),{status:404}); reportedUserId=user.id===conversation.buyer_user_id?conversation.seller_user_id:conversation.buyer_user_id;}
+    if(!reportedUserId||reportedUserId===user.id) throw Object.assign(new Error('You cannot report your own account.'),{status:400});
+    const target=db.prepare('SELECT id,display_name FROM users WHERE id=?').get(reportedUserId); if(!target) throw Object.assign(new Error('Reported user not found.'),{status:404});
+    const duplicate=db.prepare("SELECT id FROM marketplace_reports WHERE reporter_user_id=? AND reported_user_id=? AND COALESCE(listing_id,'')=? AND COALESCE(conversation_id,'')=? AND status IN ('open','under_review') LIMIT 1").get(user.id,reportedUserId,listingId||'',conversationId||'');
+    if(duplicate) throw Object.assign(new Error('You already have an active report for this issue.'),{status:409});
+    const id=randomId('rpt_'), now=nowIso(); db.prepare('INSERT INTO marketplace_reports(id,reporter_user_id,reported_user_id,listing_id,conversation_id,reason,details,status,action_taken,admin_note,resolved_by_user_id,resolved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(id,user.id,reportedUserId,listingId,conversationId,reason,details,'open','','',null,null,now,now);
+    notifyAdmins({type:'marketplace_report',title:'New marketplace safety report',body:`${user.displayName} reported ${target.display_name}.`,href:'/admin',entityType:'marketplace_report',entityId:id});
+    audit(user.id,'marketplace.report.create','marketplace_report',id,{reportedUserId,listingId,conversationId,reason});
+    return json(res,201,{report:{id,status:'open',reason,createdAt:now}},cors);
+  }
+
+  if(req.method==='GET'&&url.pathname==='/admin/marketplace-reports'){
+    requireAdmin(req); const rows=db.prepare(`SELECT r.*,reporter.display_name reporter_name,reported.display_name reported_name,l.title listing_title FROM marketplace_reports r JOIN users reporter ON reporter.id=r.reporter_user_id JOIN users reported ON reported.id=r.reported_user_id LEFT JOIN marketplace_listings l ON l.id=r.listing_id ORDER BY CASE r.status WHEN 'open' THEN 0 WHEN 'under_review' THEN 1 ELSE 2 END,r.created_at DESC LIMIT 250`).all();
+    return json(res,200,{reports:rows.map(r=>({id:r.id,reporter:{id:r.reporter_user_id,displayName:r.reporter_name},reportedUser:{id:r.reported_user_id,displayName:r.reported_name},listing:r.listing_id?{id:r.listing_id,title:r.listing_title}:null,conversationId:r.conversation_id,reason:r.reason,details:r.details,status:r.status,actionTaken:r.action_taken,adminNote:r.admin_note,createdAt:r.created_at,resolvedAt:r.resolved_at}))},cors);
+  }
+  const marketplaceReportReview=url.pathname.match(/^\/admin\/marketplace-reports\/([^/]+)$/);
+  if(req.method==='PATCH'&&marketplaceReportReview){
+    const admin=requireAdmin(req); const report=db.prepare('SELECT * FROM marketplace_reports WHERE id=?').get(marketplaceReportReview[1]); if(!report) throw Object.assign(new Error('Report not found.'),{status:404});
+    if(!['open','under_review'].includes(report.status)) throw Object.assign(new Error('This report is already closed.'),{status:409});
+    const body=await readBody(req); const decision=String(body.decision||'').trim(); const note=String(body.note||'').trim().slice(0,1200); const allowed=new Set(['resolve','dismiss','remove_listing','suspend_user']); if(!allowed.has(decision)) throw Object.assign(new Error('Invalid moderation decision.'),{status:400});
+    if(decision==='remove_listing'){if(!report.listing_id) throw Object.assign(new Error('This report is not linked to a listing.'),{status:400});db.prepare("UPDATE marketplace_listings SET status='removed',moderation_state='removed',updated_at=? WHERE id=?").run(nowIso(),report.listing_id);}
+    if(decision==='suspend_user'){db.prepare("UPDATE users SET status='suspended' WHERE id=?").run(report.reported_user_id);db.prepare('DELETE FROM sessions WHERE user_id=?').run(report.reported_user_id);db.prepare("UPDATE marketplace_listings SET status='removed',moderation_state='removed',updated_at=? WHERE seller_user_id=?").run(nowIso(),report.reported_user_id);}
+    const nextStatus=decision==='dismiss'?'dismissed':'resolved', now=nowIso(); db.prepare('UPDATE marketplace_reports SET status=?,action_taken=?,admin_note=?,resolved_by_user_id=?,resolved_at=?,updated_at=? WHERE id=?').run(nextStatus,decision,note,admin.id,now,now,report.id);
+    audit(admin.id,'marketplace.report.review','marketplace_report',report.id,{decision,reportedUserId:report.reported_user_id,listingId:report.listing_id}); return json(res,200,{report:{id:report.id,status:nextStatus,actionTaken:decision,resolvedAt:now}},cors);
+  }
+
+  if(req.method==='GET'&&url.pathname==='/admin/meetup-locations'){
+    requireAdmin(req); const city=String(url.searchParams.get('city')||'').trim(); const rows=city?db.prepare('SELECT * FROM meetup_locations WHERE city=? ORDER BY status,name').all(city):db.prepare('SELECT * FROM meetup_locations ORDER BY city,status,name').all();
+    return json(res,200,{locations:rows.map(r=>({id:r.id,name:r.name,city:r.city,area:r.area,kind:r.kind,status:r.status,createdAt:r.created_at}))},cors);
+  }
+  if(req.method==='POST'&&url.pathname==='/admin/meetup-locations'){
+    const admin=requireAdmin(req); const body=await readBody(req); const name=String(body.name||'').trim(), city=String(body.city||'').trim(), area=String(body.area||'').trim(), kind=String(body.kind||'Public place').trim();
+    if(name.length<3||area.length<2||!MARKETPLACE_CITIES.has(city)) throw Object.assign(new Error('Name, supported city and area are required.'),{status:400});
+    const duplicate=db.prepare("SELECT id FROM meetup_locations WHERE lower(name)=lower(?) AND city=? AND status='approved' LIMIT 1").get(name,city); if(duplicate) throw Object.assign(new Error('An approved meetup location with this name already exists in that city.'),{status:409});
+    const id=randomId('loc_'), now=nowIso(); db.prepare('INSERT INTO meetup_locations(id,name,city,area,kind,status,created_at) VALUES(?,?,?,?,?,?,?)').run(id,name,city,area,kind,'approved',now); audit(admin.id,'meetup_location.approve','meetup_location',id,{city,area}); return json(res,201,{location:{id,name,city,area,kind,status:'approved',createdAt:now}},cors);
+  }
+  const adminMeetupLocation=url.pathname.match(/^\/admin\/meetup-locations\/([^/]+)$/);
+  if(req.method==='PATCH'&&adminMeetupLocation){
+    const admin=requireAdmin(req); const body=await readBody(req); const status=String(body.status||''); if(!['approved','disabled'].includes(status)) throw Object.assign(new Error('Status must be approved or disabled.'),{status:400}); const row=db.prepare('SELECT * FROM meetup_locations WHERE id=?').get(adminMeetupLocation[1]); if(!row) throw Object.assign(new Error('Meetup location not found.'),{status:404}); db.prepare('UPDATE meetup_locations SET status=? WHERE id=?').run(status,row.id); audit(admin.id,'meetup_location.status','meetup_location',row.id,{from:row.status,to:status}); return json(res,200,{location:{id:row.id,name:row.name,city:row.city,area:row.area,kind:row.kind,status}},cors);
+  }
+
   // --- Person-to-person marketplace API -----------------------------------
   if(req.method==='GET'&&url.pathname==='/marketplace/listings'){
     const current=getCurrentUser(req); const city=current?.city||marketplaceCity(url.searchParams.get('city'));
@@ -787,7 +877,7 @@ async function route(req,res){
 
   if(req.method==='GET'&&url.pathname==='/marketplace/listings/me'){
     const user=requireUser(req); const rows=db.prepare(`SELECT * FROM marketplace_listings WHERE seller_user_id=? ORDER BY created_at DESC`).all(user.id);
-    return json(res,200,{listings:rows.map(r=>({id:r.id,title:r.title,description:r.description,category:r.category,condition:r.condition,price:r.price,city:r.city,area:r.area,imageUrl:publicAssetUrl(req,r.image_url),status:r.status,createdAt:r.created_at,updatedAt:r.updated_at}))},cors);
+    return json(res,200,{listings:rows.map(r=>({id:r.id,title:r.title,description:r.description,category:r.category,condition:r.condition,price:r.price,city:r.city,area:r.area,imageUrl:publicAssetUrl(req,r.image_url),status:r.status,moderationState:r.moderation_state||'clear',createdAt:r.created_at,updatedAt:r.updated_at}))},cors);
   }
 
   if(req.method==='POST'&&url.pathname==='/marketplace/listings'){
@@ -824,6 +914,7 @@ async function route(req,res){
     if(!existing) throw Object.assign(new Error('Your listing was not found.'),{status:404});
     const body=await readBody(req); const nextStatus=body.status===undefined?existing.status:String(body.status);
     if(!['draft','active','sold','removed'].includes(nextStatus)) throw Object.assign(new Error('Invalid listing status.'),{status:400});
+    if(existing.moderation_state==='removed'&&nextStatus==='active') throw Object.assign(new Error('This listing was removed by MeetMart moderation and cannot be reactivated by the seller.'),{status:403});
     db.prepare('UPDATE marketplace_listings SET status=?,updated_at=? WHERE id=?').run(nextStatus,nowIso(),existing.id);
     audit(user.id,'marketplace.listing.status','marketplace_listing',existing.id,{from:existing.status,to:nextStatus});
     return json(res,200,{listing:{id:existing.id,status:nextStatus}},cors);
@@ -860,6 +951,7 @@ async function route(req,res){
     const user=requireUser(req); const requestRow=db.prepare("SELECT * FROM wanted_requests WHERE id=? AND status='open'").get(wantedRespond[1]);
     if(!requestRow||requestRow.city!==user.city) throw Object.assign(new Error('Wanted request is unavailable in your city.'),{status:404});
     if(requestRow.requester_user_id===user.id) throw Object.assign(new Error('You cannot respond to your own wanted request.'),{status:400});
+    assertContactAllowed(user.id,requestRow.requester_user_id);
     const body=await readBody(req); const message=String(body.message||'I may have this item.').trim(); let listingId=body.listingId?String(body.listingId):null;
     if(listingId){const owned=db.prepare("SELECT id FROM marketplace_listings WHERE id=? AND seller_user_id=? AND city=? AND status='active'").get(listingId,user.id,user.city); if(!owned) throw Object.assign(new Error('Linked listing must be one of your active listings.'),{status:400});}
     const id=randomId('wrp_'); try{db.prepare('INSERT INTO wanted_responses(id,request_id,responder_user_id,message,listing_id,created_at) VALUES(?,?,?,?,?,?)').run(id,requestRow.id,user.id,message,listingId,nowIso());}catch{throw Object.assign(new Error('You already responded to this request.'),{status:409});}
@@ -882,6 +974,7 @@ async function route(req,res){
     const user=requireUser(req); const body=await readBody(req); const listing=db.prepare("SELECT * FROM marketplace_listings WHERE id=? AND status='active'").get(String(body.listingId||''));
     if(!listing||listing.city!==user.city) throw Object.assign(new Error('Listing is unavailable in your city.'),{status:404});
     if(listing.seller_user_id===user.id) throw Object.assign(new Error('You cannot start a buyer chat on your own listing.'),{status:400});
+    assertContactAllowed(user.id,listing.seller_user_id);
     let conversation=db.prepare('SELECT * FROM conversations WHERE listing_id=? AND buyer_user_id=? AND seller_user_id=?').get(listing.id,user.id,listing.seller_user_id);
     if(!conversation){const id=randomId('cnv_'),now=nowIso();db.prepare('INSERT INTO conversations(id,listing_id,buyer_user_id,seller_user_id,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(id,listing.id,user.id,listing.seller_user_id,now,now);conversation={id,listing_id:listing.id,buyer_user_id:user.id,seller_user_id:listing.seller_user_id,created_at:now,updated_at:now};audit(user.id,'conversation.create','conversation',id,{listingId:listing.id});}
     return json(res,200,{conversation:{id:conversation.id,listingId:conversation.listing_id,buyerUserId:conversation.buyer_user_id,sellerUserId:conversation.seller_user_id}},cors);
@@ -902,6 +995,7 @@ async function route(req,res){
   }
   if(req.method==='POST'&&conversationMessages){
     const user=requireUser(req); const c=db.prepare('SELECT * FROM conversations WHERE id=? AND (buyer_user_id=? OR seller_user_id=?)').get(conversationMessages[1],user.id,user.id); if(!c) throw Object.assign(new Error('Conversation not found.'),{status:404});
+    assertContactAllowed(user.id,user.id===c.buyer_user_id?c.seller_user_id:c.buyer_user_id);
     const body=await readBody(req); const text=String(body.body||'').trim(); if(!text||text.length>2000) throw Object.assign(new Error('Message must be between 1 and 2000 characters.'),{status:400});
     const id=randomId('msg_'), now=nowIso(); db.prepare('INSERT INTO messages(id,conversation_id,sender_user_id,body,created_at) VALUES(?,?,?,?,?)').run(id,c.id,user.id,text,now);db.prepare('UPDATE conversations SET updated_at=? WHERE id=?').run(now,c.id);
     const recipientId=user.id===c.buyer_user_id?c.seller_user_id:c.buyer_user_id; const listing=db.prepare('SELECT title FROM marketplace_listings WHERE id=?').get(c.listing_id);

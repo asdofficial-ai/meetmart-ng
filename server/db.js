@@ -339,3 +339,37 @@ CREATE TABLE IF NOT EXISTS order_cases (
 CREATE INDEX IF NOT EXISTS idx_order_cases_order ON order_cases(order_id,created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_order_cases_status ON order_cases(status,created_at DESC);
 `);
+
+
+// Beta trust & moderation extensions.
+try { db.exec("ALTER TABLE marketplace_listings ADD COLUMN moderation_state TEXT NOT NULL DEFAULT 'clear'"); } catch {}
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS user_blocks (
+  blocker_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(blocker_user_id, blocked_user_id),
+  CHECK(blocker_user_id <> blocked_user_id)
+);
+CREATE INDEX IF NOT EXISTS idx_user_blocks_blocked ON user_blocks(blocked_user_id,created_at DESC);
+
+CREATE TABLE IF NOT EXISTS marketplace_reports (
+  id TEXT PRIMARY KEY,
+  reporter_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  reported_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  listing_id TEXT REFERENCES marketplace_listings(id) ON DELETE SET NULL,
+  conversation_id TEXT REFERENCES conversations(id) ON DELETE SET NULL,
+  reason TEXT NOT NULL,
+  details TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','under_review','resolved','dismissed')),
+  action_taken TEXT NOT NULL DEFAULT '',
+  admin_note TEXT NOT NULL DEFAULT '',
+  resolved_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+  resolved_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_marketplace_reports_status ON marketplace_reports(status,created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_marketplace_reports_reported ON marketplace_reports(reported_user_id,created_at DESC);
+`);
